@@ -34,8 +34,8 @@ namespace BlueToothConnect
                     Pin = Console.ReadLine();
 
 
-                    EventHandler<BluetoothWin32AuthenticationEventArgs> handler = new EventHandler<BluetoothWin32AuthenticationEventArgs>(HandleRequests);
-                    BluetoothWin32Authentication auth = new BluetoothWin32Authentication(handler);
+                    var handler = new EventHandler<BluetoothWin32AuthenticationEventArgs>(HandleRequests);
+                    var auth = new BluetoothWin32Authentication(handler);
 
                     //BluetoothSecurity.RefusePinRequest(device.DeviceAddress);
                     
