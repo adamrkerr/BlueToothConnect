@@ -6,9 +6,17 @@ using System.Threading.Tasks;
 using InTheHand.Net.Sockets;
 using InTheHand.Net.Bluetooth;
 using System.Threading;
+using System.IO;
 
 namespace BlueToothConnect
 {
+    enum RunModes
+    {
+        SingleResponse = 1,
+        DataLogging = 2,
+        Exit = 3
+    }
+
     class Program
     {
         static readonly Guid MyServiceUuid
@@ -26,79 +34,25 @@ namespace BlueToothConnect
             {
 
                 //connect to device
-                using (var cli = new BluetoothClient())
+                using (var cli = SetUpDeviceConnection(device))
                 {
-                    //device.SetServiceState(service, true);
-                    Console.WriteLine("Enter a PIN for the device:");
 
-                    Pin = Console.ReadLine();
-
-
-                    var handler = new EventHandler<BluetoothWin32AuthenticationEventArgs>(HandleRequests);
-                    var auth = new BluetoothWin32Authentication(handler);
-
-                    //BluetoothSecurity.RefusePinRequest(device.DeviceAddress);
-                    
-                    BluetoothSecurity.PairRequest(device.DeviceAddress, null);
-                    //var wtf = BluetoothSecurity.SetPin(device.DeviceAddress, PIN);
-                    //while (Blocker == 0) { }
-
-
-                    // now it is paired
-                    var service = BluetoothService.SerialPort;
-
-
-                    if (!cli.Connected)
-                    {
-                        cli.Connect(device.DeviceAddress, service);
-                    }
+                    //What do we want to do?
+                    var runMode = SelectRunMode();
 
                     using (var stream = cli.GetStream())
                     {
-                        //cli.Connect(device.DeviceAddress, service);
-
-                        //send messages, get responses?
-                        Console.WriteLine("Enter a message to send to the device:");
-                        var msg = Console.ReadLine();
-                        var streamPosition = 0;
-
-                        while (msg != "x")
+                        switch (runMode)
                         {
-                            msg = msg + "\r";
-                            stream.Write(msg.Select(c => (byte)c).ToArray(), 0, msg.Length);
-                            streamPosition += (msg.Length - 1);
-                            stream.Flush();
-
-                            Thread.Sleep(100);
-
-                            var builder = new StringBuilder();
-                            var responseByte = stream.ReadByte();
-                            var responseChar = (char)responseByte;
-
-
-                            while(responseChar != '>')
-                            {
-                                builder.Append(responseChar);
-                                responseByte = stream.ReadByte();
-                                responseChar = (char)responseByte;                                
-                            }
-
-                            var responseString = builder.ToString();
-                            responseString = responseString.TrimEnd('\0').Replace("\r", "\r\n");
-
-                            
-
-                            Console.WriteLine(String.Format("Device responded: {0}", responseString));
-
-                            //"010C\r41 0C 0B 2B \r\r>"
-
-                            Console.WriteLine("Enter another message, or 'x' to quit.");
-                            msg = Console.ReadLine();
+                            case RunModes.SingleResponse:
+                                RunInSingleResponseMode(stream).GetAwaiter().GetResult();
+                                break;
+                            case RunModes.DataLogging:
+                                RunInDataLoggingMode(stream).GetAwaiter().GetResult();
+                                break;
                         }
+
                     }
-
-                    // pairing failed
-
 
                 }
                 BluetoothSecurity.RemoveDevice(device.DeviceAddress);
@@ -109,10 +63,166 @@ namespace BlueToothConnect
             var wait = Console.ReadLine();
         }
 
+        private static BluetoothClient SetUpDeviceConnection(BluetoothDeviceInfo device)
+        {
+            var cli = new BluetoothClient();
+
+            Console.WriteLine("Enter a PIN for the device:");
+
+            Pin = Console.ReadLine();
+
+            var handler = new EventHandler<BluetoothWin32AuthenticationEventArgs>(HandleRequests);
+            var auth = new BluetoothWin32Authentication(handler);
+
+            BluetoothSecurity.PairRequest(device.DeviceAddress, null);
+
+            // now it is paired
+            var service = BluetoothService.SerialPort;
+
+            if (!cli.Connected)
+            {
+                cli.Connect(device.DeviceAddress, service);
+            }
+
+            return cli;
+        }
+
+        private static RunModes SelectRunMode()
+        {
+            Console.WriteLine("Please select a run mode:");
+            Console.WriteLine("1 - Single Response");
+            Console.WriteLine("2 - Data Logging");
+            Console.WriteLine("3 - Exit");
+
+            var selection = ReadLineInt();
+
+            //there are more elegant ways to do this, but this way is foolproof
+            switch (selection)
+            {
+                case 1:
+                    return RunModes.SingleResponse;
+                case 2:
+                    return RunModes.DataLogging;
+                default:
+                    return RunModes.Exit;
+            }
+
+        }
+
+        private static async Task RunInDataLoggingMode(System.Net.Sockets.NetworkStream stream)
+        {
+
+            Console.WriteLine("Enter the number of data points to capture:");
+            var pointsToCapture = ReadLineInt();
+            var responses = new Queue<string>(pointsToCapture);
+
+            Console.WriteLine("Enter the name of the log file: ");
+            var logFileName = Console.ReadLine();
+
+            //send messages, get responses?
+            //"010C\r41 0C 0B 2B \r\r>"
+            Console.WriteLine("Enter messages, comma separated, to send to the device:");
+            var msg = Console.ReadLine();
+            
+            if (msg == "x")
+                return;
+
+            var msgGroup = msg.Split(',');
+
+            while (responses.Count < pointsToCapture * msgGroup.Count())
+            {
+                foreach (var singleMsg in msgGroup)
+                {
+                    var responseString = await SendCommand(singleMsg, stream);
+
+                    responses.Enqueue(responseString);
+
+                    Console.Write("Logged value {2}: {0}{1}", responseString, Environment.NewLine, responses.Count);
+                    //Thread.Sleep(10);
+                }
+            }
+
+            await WriteLogFile(responses, logFileName);
+
+        }
+
+        private static async Task WriteLogFile(Queue<string> responses, string logFileName)
+        {
+            using (var filestream = File.Open(logFileName, FileMode.OpenOrCreate))
+            {
+                while (responses.Any())
+                {
+                    var response = responses.Dequeue();
+                    
+                    var responseBytes = Encoding.ASCII.GetBytes(response);
+
+                    await filestream.WriteAsync(responseBytes, 0, responseBytes.Count());                    
+                }
+            }
+
+            Console.WriteLine("Log file saved to:" + Path.GetFullPath(logFileName));
+        }
+
+        private static int ReadLineInt()
+        {
+            var result = Console.ReadLine().Trim();
+
+            return Int32.Parse(result); //Ok to throw an error, fail loudly
+        }
+
+        private static async Task RunInSingleResponseMode(System.Net.Sockets.NetworkStream stream)
+        {
+            //cli.Connect(device.DeviceAddress, service);
+
+            //send messages, get responses?
+            Console.WriteLine("Enter a message to send to the device:");
+            var msg = Console.ReadLine();
+
+            while (msg != "x")
+            {
+                var responseString = await SendCommand(msg, stream);
+
+                Console.WriteLine(String.Format("Device responded: {0}", responseString));
+
+                //"010C\r41 0C 0B 2B \r\r>"
+
+                Console.WriteLine("Enter another message, or 'x' to quit.");
+                msg = Console.ReadLine();
+            }
+        }
+
+        private static async Task<string> SendCommand(string message, System.Net.Sockets.NetworkStream stream)
+        {
+            var command = message + "\r";
+            await stream.WriteAsync(command.Select(c => (byte)c).ToArray(), 0, command.Length);
+
+            await stream.FlushAsync();
+
+            //maybe don't need to sleep async? let's try it...
+            //Thread.Sleep(100);
+
+            var builder = new StringBuilder();
+            var buffer = new byte[1];
+            await stream.ReadAsync(buffer, 0, 1);
+            var responseChar = (char)buffer[0];
+
+            while (responseChar != '>')
+            {
+                builder.Append(responseChar);
+                await stream.ReadAsync(buffer, 0, 1);
+                responseChar = (char)buffer[0];
+            }
+
+            var responseString = builder.ToString();
+            responseString = responseString.TrimEnd('\0').Replace("\r", "\r\n");
+
+            return responseString;
+        }
+
         private static void HandleRequests(object that, BluetoothWin32AuthenticationEventArgs e)
         {
             if (e.AuthenticationMethod == BluetoothAuthenticationMethod.Legacy)
-            {               
+            {
 
                 e.Pin = Pin;
                 //BluetoothSecurity.SetPin(e.Device.DeviceAddress, Pin);
